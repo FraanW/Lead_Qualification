@@ -1,0 +1,9 @@
+fastapi
+uvicorn
+pandas
+openpyxl
+crewai
+crewai[tools]
+langchain-community
+duckduckgo-search
+python-dotenv
