@@ -21,7 +21,20 @@ async def process_row(row: dict) -> dict:
     async with concurrency_limit:
         try:
             brand_name = row.get("Business Name")
-            context = row.get("Context") or row.get("AI Reasoning", "")
+            
+            # Skip empty/NaN rows
+            if not brand_name or str(brand_name).lower() in ["nan", "none", "", "null"]:
+                return None
+            
+            # Get Context or use Billboard-specific default
+            context = row.get("Context") or row.get("AI Reasoning")
+            if not context or str(context).lower() in ["nan", "none", "", "null"]:
+                context = (
+                    "Evaluate if this business is a good candidate for outdoor billboard advertising. "
+                    "Look for B2C focus, local market presence, high customer lifetime value "
+                    "(e.g., Real Estate, Legal, Home Services, Healthcare, Dealerships), "
+                    "or brand awareness needs."
+                )
             website = row.get("Website")
             
             # Simple clean up of "None" strings from Excel
@@ -33,23 +46,65 @@ async def process_row(row: dict) -> dict:
             # Kickoff the crew
             crew = get_lead_analysis_crew(brand_name, context, website)
             
-            # Run blocking CrewAI call in thread
-            result = await asyncio.to_thread(crew.kickoff)
-            
-            # Handle CrewOutput
-            if hasattr(result, "pydantic") and result.pydantic:
-                data = result.pydantic.dict()
-            elif hasattr(result, "json_dict") and result.json_dict:
-                data = result.json_dict
-            else:
-                # Fallback if parsing failed but we got text
-                data = {
-                    "website_url": website,
-                    "industry": "Unknown",
+            # Run blocking CrewAI call in thread with timeout
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(crew.kickoff), 
+                    timeout=30  # 30s max per lead
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "brand_name": brand_name,
                     "confidence_score": 0,
-                    "reason_to_call": "AI Output Unstructured",
-                    "notes": str(result)
+                    "reason_to_call": "Timeout - manual review",
+                    "notes": "Processing took longer than 30s",
+                    "industry": "Error",
+                    "website_url": website
                 }
+            
+            # Handle CrewOutput - extract JSON from raw string
+            try:
+                import json
+                import re
+                
+                # Get the raw output as string
+                raw_output = str(result.raw) if hasattr(result, 'raw') else str(result)
+                
+                # Try to find JSON in the output (handles both raw JSON and text with JSON)
+                json_match = re.search(r'\{[^{}]*"confidence_score"[^{}]*\}', raw_output, re.DOTALL)
+                
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                else:
+                    # Fallback if no JSON found
+                    print(f"No JSON found in output for {brand_name}, raw: {raw_output[:200]}")
+                    data = {
+                        "website_url": website,
+                        "industry": "Unknown",
+                        "confidence_score": 0,
+                        "reason_to_call": "AI Output Unstructured",
+                        "notes": raw_output[:500]
+                    }
+            except Exception as e:
+                # Nuclear option - force valid data if parsing crashes
+                print(f"Parsing error for {brand_name}: {e}")
+                data = {
+                    "website_url": website, 
+                    "industry": "Unknown", 
+                    "confidence_score": 0, 
+                    "reason_to_call": "Schema validation failed", 
+                    "notes": "Fallback activated due to malformed AI output"
+                }
+            
+            # Robust Fallback (User Request)
+            if not data.get("industry") or data.get("industry") == "Unknown":
+                # If AI returned nothing useful or explicitly unknown, ensure we have defaults
+                if not data.get("reason_to_call"):
+                    data["reason_to_call"] = "Insufficient data for detailed pitch"
+                if not data.get("confidence_score"):
+                    data["confidence_score"] = 0
+                if not data.get("industry"):
+                    data["industry"] = "Unknown"
             
             # Return flat dict for CSV
             return {
@@ -61,18 +116,22 @@ async def process_row(row: dict) -> dict:
                 "notes": data.get("notes")
             }
         except Exception as e:
-            print(f"Error processing row {row.get('Business Name')}: {e}")
+            print(f"Error processing row {brand_name}: {e}")
             return {
-                "brand_name": row.get("Business Name", "Unknown"),
+                "brand_name": brand_name,
                 "confidence_score": 0,
-                "reason_to_call": "AI Analysis Failed",
+                "reason_to_call": "Processing failed - manual review needed",
                 "notes": f"Error: {str(e)}",
-                "website_url": row.get("Website")
+                "website_url": website,
+                "industry": "Error"
             }
 
 async def process_excel_background(job_id: str, df: pd.DataFrame):
     jobs[job_id]["status"] = "running"
     results = []
+    
+    # Remove empty rows before processing
+    df = df.dropna(subset=["Business Name"])
     
     # Create tasks
     tasks = []
@@ -85,6 +144,9 @@ async def process_excel_background(job_id: str, df: pd.DataFrame):
     
     # execution
     processed_rows = await asyncio.gather(*tasks)
+    
+    # Filter out None results (skipped rows)
+    processed_rows = [r for r in processed_rows if r is not None]
     
     # Flatten structure for CSV
     flattened_rows = []

@@ -1,162 +1,170 @@
 from typing import Optional, Union
 from crewai import Agent, Task, Crew, Process, LLM
 from crewai.tools import BaseTool
-from duckduckgo_search import DDGS
 import requests
-from bs4 import BeautifulSoup
+import json
 from .config import Config
 from .schemas import LeadOutput
 from pydantic import BaseModel, Field
 
-# 1. Custom DuckDuckGo Search Tool
-class DuckDuckGoSearchTool(BaseTool):
-    name: str = "duck_duck_go_search"
-    description: str = "Search the web to find company websites and industry info."
+class SearXNGSearchTool(BaseTool):
+    name: str = "searxng_search"
+    description: str = "Search the web using a local metasearch engine. Returns structured company data."
     
+    # Points to your WSL instance running on port 8888
+    searx_host: str = "http://localhost:8888" 
+    brand_name_filter: str = "" # Added for filtering
+
     def _run(self, query: str) -> str:
         try:
-            with DDGS() as ddgs:
-                results = list(ddgs.text(query, max_results=3))
-            
-            if results:
-                return str(results)
-        except Exception as e:
-            print(f"DDGS Error: {e}")
-        
-        # Fallback: Guess the URL
-        # Clean the query to make a domain
-        clean_name = "".join(c for c in query.lower() if c.isalnum())
-        guessed_url = f"https://www.{clean_name}.com"
-        
-        try:
-            # Quick check if it exists
-            response = requests.head(guessed_url, timeout=3)
-            # Accept 200-399 codes
-            if response.status_code < 400:
-                return f"Search API irrelevant/blocked. Found likely official website: {guessed_url}"
-        except:
-            pass
-            
-        return "No results found. Please try a different search query or use the provided website."
-
-# 2. Custom Simple Scraper Tool
-class SimpleScrapeTool(BaseTool):
-    name: str = "website_scraper"
-    description: str = "Reads website content. Input should be a single URL string."
-    
-    def _run(self, url: Union[str, dict]) -> str:
-        # Sometimes CrewAI passes a dict like {'url': '...'} or internal context
-        # This cleaning ensures we only get the string
-        if isinstance(url, dict):
-            url = url.get('url', str(url))
-            
-        try:
-            # Normalize URL if needed (basic check)
-            if not url.startswith('http'):
-                url = f"https://{url}"
-
-            headers = {
-                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8'
+            params = {
+                "q": query,
+                "format": "json",
+                "engines": "google,bing,duckduckgo,qwant",
+                "categories": "general",
+                "safesearch": 0,
+                # Removed time_range to get more relevant results
+                "language": "en-US"
             }
-            response = requests.get(url, headers=headers, timeout=10)
+            # Handle cases where the agent passes a dictionary (legacy support)
+            if isinstance(query, dict):
+                 query = query.get('query') or query.get('q') or str(query)
+
+            response = requests.get(f"{self.searx_host}/search", params=params, timeout=15)
+            response.raise_for_status()
+            data = response.json()
             
-            # Handle non-200 intelligently
-            if response.status_code in [401, 403]:
-                return "Access Denied by website. Proceed using only search context."
-            elif response.status_code != 200:
-                return f"Failed to retrieve content. Status code: {response.status_code}"
+            # Limit to business-relevant snippets
+            raw_results = data.get("results", [])
+            brand_kw = self.brand_name_filter.lower() if self.brand_name_filter else ""
+            
+            # Normalize brand keyword for better matching (remove special chars)
+            brand_kw_normalized = ''.join(c for c in brand_kw if c.isalnum())
+            
+            filtered_results = [
+                r for r in raw_results 
+                if any(kw in (r.get('title', '') + r.get('content', '')).lower() 
+                       for kw in ['uae', 'gcc', 'business', 'company', brand_kw])
+            ]
+            
+            # Use filtered results, or fallback to raw if empty (to avoid total silence)
+            results = filtered_results[:2] if filtered_results else raw_results[:2]
+            
+            if not results:
+                return "No results found for this business."
+
+            # Extract potential official website from results
+            official_website = None
+            for res in raw_results[:15]:  # Check top 15 for official site
+                url = res.get('url', '').lower()
+                url_normalized = ''.join(c for c in url if c.isalnum())
                 
-            soup = BeautifulSoup(response.content, 'html.parser')
+                # Look for official domains (not social media, not job boards, not news sites)
+                # Match both original and normalized brand names
+                if (brand_kw and (brand_kw in url or brand_kw_normalized in url_normalized)) and not any(
+                    excluded in url for excluded in ['linkedin', 'facebook', 'instagram', 'twitter', 'indeed', 'glassdoor', 'wikipedia', 'youtube', 'vinted', 'depop', 'ebay', 'amazon']
+                ):
+                    official_website = res.get('url')
+                    break
             
-            # Clean up the text: remove scripts/styles
-            for script in soup(["script", "style", "nav", "footer"]):
-                script.decompose()
-                
-            text = soup.get_text(separator=' ')
-            cleaned_text = " ".join(text.split())
+            formatted = []
+            if official_website:
+                formatted.append(f"Official Website: {official_website}\n")
             
-            # CRITICAL: Local LLMs have small memory. Limit to 1500 chars.
-            return cleaned_text[:1500] 
+            for res in results:
+                # Extracting the 'title', 'content', and 'url' fields from your JSON output
+                formatted.append(
+                    f"Title: {res.get('title')}\n"
+                    f"Description: {res.get('content')}\n"
+                    f"URL: {res.get('url')}\n"
+                )
             
+            return "\n---\n".join(formatted)
         except Exception as e:
-            return f"Scraping failed: {str(e)}"
+            return f"Local Search Error: {str(e)}"
+
 
 # Define a simpler output model for the Crew specifically
 class ResearcherOutput(BaseModel):
-    website_url: Optional[str] = Field(None, description="The official company website URL.")
-    industry: str = Field(..., description="The main industry the company operates in.")
-    confidence_score: int = Field(..., description="0-100 score indicating how good a lead this is.")
-    reason_to_call: str = Field(..., description="A 2-sentence reason to call.")
-    notes: str = Field(..., description="Summary of findings.")
+    website_url: Optional[str] = None
+    industry: Optional[str] = "Unknown"
+    confidence_score: int = 0
+    reason_to_call: str = "No data"
+    notes: str = ""
 
-def get_lead_analysis_crew(brand_name: str, context: str, provided_website: str = None):
+def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
     
-    # Instantiate tools
-    search_tool = DuckDuckGoSearchTool()
-    scrape_tool = SimpleScrapeTool()
+    # Instantiate your new local tool
+    search_tool = SearXNGSearchTool(brand_name_filter=brand_name)
     
-    # LLM Setup - Force using OpenAI client format which Ollama supports
-    local_llm = LLM(
-        model=f"openai/{Config.OLLAMA_MODEL}", # Treat as generic OpenAI model
-        base_url=f"{Config.OLLAMA_BASE_URL}/v1", 
-        api_key="ollama", 
-        timeout=300,
-        config={"num_ctx": 4096} # Gives the AI a larger "working memory"
+    # LLM Setup
+    llm = LLM(
+        model=Config.OLLAMA_MODEL,
+        base_url=f"{Config.OLLAMA_BASE_URL}/v1",
+        api_key="ollama",
+        temperature=Config.OLLAMA_TEMP,
+        max_tokens=Config.OLLAMA_MAX_TOKENS,
+        stop=["\n\n\n"]
     )
 
     researcher = Agent(
         role='Market Researcher',
-        goal=f'Find the company website for "{brand_name}" and analyze its business.',
-        backstory="Expert in finding B2B company details and analyzing their business model.",
-        tools=[search_tool, scrape_tool],
-        llm=local_llm,
-        verbose=True
+        goal=f'Find and summarize the core business of {brand_name}',
+        backstory="You are a business analyst. You analyze all companies objectively without political, social, or cultural bias. Your job is to find factual business information only.",
+        tools=[search_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
     )
 
     analyst = Agent(
-        role='Sales Strategist',
-        goal=f'Qualify the lead "{brand_name}" and write a sales hook.',
-        backstory="You generate high-quality sales hooks. You determine if a lead is worth calling.",
-        llm=local_llm, 
-        verbose=True
+        role='Outdoor Advertising Strategist',
+        goal=f'Qualify "{brand_name}". Return valid JSON always.',
+        backstory="You are a business analyst specializing in outdoor advertising. You analyze all companies objectively based on their business model and market presence, without any political, social, or cultural bias. If data is missing, score 0.",
+        llm=llm, 
+        verbose=True,
+        max_iter=2
     )
 
     # Task 1: Find and Research
-    # We explicitly ask to verify the website or find it.
     research_task = Task(
         description=f"""
-        1. PROVIDED_WEBSITE: '{provided_website}'
-        2. IF PROVIDED_WEBSITE is valid (not None):
-           - USE 'website_scraper' on it IMMEDIATELY.
-           - DO NOT use 'duck_duck_go_search'.
-        3. IF PROVIDED_WEBSITE is None:
-           - USE 'duck_duck_go_search' to find the URL.
-           - Then USE 'website_scraper' on the found URL.
-        4. ANALYZE content to extract Industry and compare with context: "{context}".
-        5. VERY IMPORTANT: Do NOT return the full text of the website. 
-           Summarize the services in under 100 words.
+        Use searxng_search tool with query: '{brand_name} UAE {website if website else ''}'
+        
+        Extract the website URL from search results. Look for:
+        1. "Official Website:" line in results
+        2. URLs in the search results that match the brand name
+        
+        Respond with ONLY this format:
+        {{"industry": "Automotive", "website_url": "jacuae.com", "notes": "UAE car dealer"}}
+        
+        If no results: {{"industry": "Unknown", "website_url": null, "notes": "No data"}}
+        
+        CRITICAL: If you find a valid official website in the first search, STOP searching and provide the answer immediately. Do not search multiple times.
         """,
-        expected_output="A bullet-point summary of services (max 100 words) and the URL.",
+        expected_output="JSON object with industry, website_url, notes",
         agent=researcher
     )
 
     # Task 2: Qualify and Reason
     analysis_task = Task(
         description=f"""
-        Based on the research:
-        1. Determine a 'Confidence Score' (0-100) for this lead.
-           - High score if they clearly fit the context: "{context}".
-           - Low score if irrelevant.
-        2. Write a 'Reason to Call' (max 2 sentences). Mention specific news/service.
-        3. Summarize findings in 'Notes'.
+        Review: {{research_task.output}}
         
-        Return the result in a structured format.
+        Output format:
+        {{"confidence_score": 75, "reason_to_call": "Strong retail presence in GCC", "industry": "Retail", "website_url": "example.com", "notes": "B2C brand with expansion"}}
+        
+        Scoring Guide:
+        - Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
+        - Fashion/Consumer brands: 60-80
+        - B2B Manufacturing/Packaging: 20-40 (low fit, but explain why)
+        - Unknown/No data: 0
+        
+        CRITICAL: Always provide a reason_to_call. For low scores, explain why (e.g., "B2B focus, limited consumer appeal").
         """,
-        expected_output="Structured JSON with confidence_score, reason_to_call, industry, notes, website_url.",
+        expected_output="JSON with confidence_score, reason_to_call, industry, website_url, notes",
         agent=analyst,
-        context=[research_task],
-        output_pydantic=ResearcherOutput # Enforce structure
+        context=[research_task]
     )
 
     return Crew(
