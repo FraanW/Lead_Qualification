@@ -142,8 +142,9 @@ class ResearcherOutput(BaseModel):
 
 def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
     
-    # Instantiate your new local tool
+    # Instantiate tools
     search_tool = SearXNGSearchTool(brand_name_filter=brand_name)
+    crawl_tool = WebCrawlTool()
     
     # LLM Setup
     llm = LLM(
@@ -160,6 +161,16 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         goal=f'Find and summarize the core business of {brand_name}',
         backstory="You are a business analyst. You analyze all companies objectively without political, social, or cultural bias. Your job is to find factual business information only.",
         tools=[search_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    contact_extractor = Agent(
+        role='Contact Information Specialist',
+        goal=f'Extract phone numbers and emails from the official website headers and footers of {brand_name}.',
+        backstory="You are a specialist in finding contact details. You focus specifically on the header and footer of websites, as that is where contact info usually lives.",
+        tools=[crawl_tool],
         llm=llm,
         verbose=True,
         max_iter=3
@@ -194,13 +205,51 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         agent=researcher
     )
 
-    # Task 2: Qualify and Reason
+    # Task 2: Extract Contact Information
+    contact_task = Task(
+        description=f"""
+        Review the official website found: {{research_task.output}}
+        
+        1. Extract the website_url from the research output.
+        2. If the URL doesn't start with http:// or https://, add https:// to it.
+        3. Use web_crawl on the complete URL.
+        4. Analyze the HEADER and FOOTER sections provided by the tool.
+        5. Extract any Phone Numbers and Emails.
+        
+        Respond with valid JSON:
+        {{
+            "phone": "...", 
+            "email": "...",
+            "other_contacts": "..."
+        }}
+        
+        If no website or crawl fails:
+        {{"phone": "", "email": "", "other_contacts": ""}}
+        """,
+        expected_output="JSON with extracted contact details",
+        agent=contact_extractor,
+        context=[research_task]
+    )
+
+    # Task 3: Qualify and Reason
     analysis_task = Task(
         description=f"""
-        Review: {{research_task.output}}
+        Review Research: {{research_task.output}}
+        Review Contacts: {{contact_task.output}}
         
-        Output format:
-        {{"confidence_score": 75, "reason_to_call": "Strong retail presence in GCC", "industry": "Retail", "website_url": "example.com", "notes": "B2C brand with expansion"}}
+        Output format with company contact information:
+        {{
+            "confidence_score": 75,
+            "reason_to_call": "Strong retail presence in GCC",
+            "category_main_industry": "Retail",
+            "notes": "B2C brand with expansion",
+            "company": {{
+                "phone": "...",
+                "email": "...",
+                "website": "...",
+                "Other": "..."
+            }}
+        }}
         
         Scoring Guide:
         - Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
@@ -208,16 +257,19 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         - B2B Manufacturing/Packaging: 20-40 (low fit, but explain why)
         - Unknown/No data: 0
         
-        CRITICAL: Always provide a reason_to_call. For low scores, explain why (e.g., "B2B focus, limited consumer appeal").
+        CRITICAL: 
+        1. Always provide a reason_to_call. For low scores, explain why.
+        2. Include the company object with contact info from contact_task.
+        3. Set website from research_task output.
         """,
-        expected_output="JSON with confidence_score, reason_to_call, industry, website_url, notes",
+        expected_output="JSON with confidence_score, reason_to_call, category_main_industry, notes, and company object",
         agent=analyst,
-        context=[research_task]
+        context=[research_task, contact_task]
     )
 
     return Crew(
-        agents=[researcher, analyst],
-        tasks=[research_task, analysis_task],
+        agents=[researcher, contact_extractor, analyst],
+        tasks=[research_task, contact_task, analysis_task],
         process=Process.sequential
     )
 
@@ -370,5 +422,139 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
     return Crew(
         agents=[researcher, analyst],
         tasks=[research_task, validation_task],
+        process=Process.sequential
+    )
+
+
+def get_business_lead_analysis_crew(brand_name: str, website: str = None):
+    """
+    Business lead analysis crew - similar to social leads but focused on business data
+    """
+    # Instantiate tools
+    search_tool = SearXNGSearchTool(brand_name_filter=brand_name)
+    crawl_tool = WebCrawlTool()
+    
+    # LLM Setup
+    llm = LLM(
+        model=Config.OLLAMA_MODEL,
+        base_url=f"{Config.OLLAMA_BASE_URL}/v1",
+        api_key="ollama",
+        temperature=Config.OLLAMA_TEMP,
+        max_tokens=Config.OLLAMA_MAX_TOKENS,
+        stop=["\n\n\n"]
+    )
+
+    researcher = Agent(
+        role='Business Intelligence Researcher',
+        goal=f'Find and verify the official website of {brand_name}.',
+        backstory="You are experts at identifying the ONE official website for a brand, avoiding social media pages or directories.",
+        tools=[search_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    contact_extractor = Agent(
+        role='Contact Information Specialist',
+        goal=f'Extract phone numbers and emails from the official website headers and footers of {brand_name}.',
+        backstory="You are a specialist in finding contact details. You focus specifically on the header and footer of websites, as that is where contact info usually lives.",
+        tools=[crawl_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    analyst = Agent(
+        role='Business Lead Validator',
+        goal=f'Determine if {brand_name} is a high-quality lead based on all research. Qualify and score lead.',
+        backstory="You synthesize all data. You look at the business relevance and the ease of contact to provide a final score.",
+        llm=llm, 
+        verbose=True,
+        max_iter=2
+    )
+
+    # Task 1: Find Official Website
+    research_task = Task(
+        description=f"""
+        1. Search for {brand_name} (UAE focus) using searxng_search.
+        2. Identify the ONE official website URL.
+        
+        Respond with valid JSON:
+        {{
+            "brand_name": "{brand_name}",
+            "official_website": "...", 
+            "industry_guess": "..."
+        }}
+        """,
+        expected_output="JSON with official website URL",
+        agent=researcher
+    )
+
+    # Task 2: Contact Extraction
+    contact_task = Task(
+        description=f"""
+        Review the official website found: {{research_task.output}}
+        
+        1. Extract the website_url from the research output.
+        2. If the URL doesn't start with http:// or https://, add https:// to it.
+        3. Use web_crawl on the complete URL.
+        4. Analyze the HEADER and FOOTER sections provided by the tool.
+        5. Extract any Phone Numbers and Emails.
+        
+        Respond with valid JSON:
+        {{
+            "phone": "...", 
+            "email": "...",
+            "other_contacts": "..."
+        }}
+        
+        If no website or crawl fails:
+        {{"phone": "", "email": "", "other_contacts": ""}}
+        """,
+        expected_output="JSON with extracted contact details",
+        agent=contact_extractor,
+        context=[research_task]
+    )
+
+    # Task 3: Final Validation and Scoring
+    validation_task = Task(
+        description=f"""
+        Research: {{research_task.output}}
+        Contacts: {{contact_task.output}}
+        
+        Final Lead Qualification:
+        - confidence_score (0-100): Based on business suitability for outdoor advertising
+        - category_main_industry: Main industry category
+        - ai_reason_to_call: ONE sentence explaining why to reach out
+        
+        Scoring Guide:
+        - Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
+        - Fashion/Consumer brands: 60-80
+        - B2B Manufacturing/Packaging: 20-40 (low fit, but explain why)
+        - Unknown/No data: 0
+        
+        Output JSON:
+        {{
+            "brand_name": "{brand_name}",
+            "confidence_score": ...,
+            "category_main_industry": "...",
+            "ai_reason_to_call": "...",
+            "notes": "...",
+            "company": {{
+                "phone": "...",
+                "email": "...",
+                "website": "...",
+                "Other": "..."
+            }}
+        }}
+        """,
+        expected_output="Final Lead JSON with company contact information",
+        agent=analyst,
+        context=[research_task, contact_task]
+    )
+
+    return Crew(
+        agents=[researcher, contact_extractor, analyst],
+        tasks=[research_task, contact_task, validation_task],
         process=Process.sequential
     )

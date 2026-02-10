@@ -16,7 +16,7 @@ class DecisionMaker(BaseModel):
 
 class LeadOutput(BaseModel):
     brand_name: str
-    source: Literal["social", "news", "proximity"] = "news"
+    source: Literal["social", "news", "proximity", "business"] = "news"
     category_main_industry: str = ""
     confidence_score: int = Field(default=0, ge=0, le=100)
     contactibility_score: int = Field(default=0, ge=0, le=100)
