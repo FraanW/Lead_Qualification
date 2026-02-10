@@ -44,7 +44,7 @@ class SearXNGSearchTool(BaseTool):
             filtered_results = [
                 r for r in raw_results 
                 if any(kw in (r.get('title', '') + r.get('content', '')).lower() 
-                       for kw in ['uae', 'gcc', 'business', 'company', brand_kw])
+                       for kw in ['uae', 'gcc', 'business', 'company', 'contact', 'phone', 'email', 'maps', brand_kw])
             ]
             
             # Use filtered results, or fallback to raw if empty (to avoid total silence)
@@ -82,6 +82,54 @@ class SearXNGSearchTool(BaseTool):
             return "\n---\n".join(formatted)
         except Exception as e:
             return f"Local Search Error: {str(e)}"
+
+class WebCrawlTool(BaseTool):
+    name: str = "web_crawl"
+    description: str = "Crawl a website to extract text content, specifically targeting header and footer for contact info."
+
+    def _run(self, url: str) -> str:
+        try:
+            import re
+            response = requests.get(url, timeout=10, headers={"User-Agent": "Mozilla/5.0"})
+            response.raise_for_status()
+            
+            from bs4 import BeautifulSoup
+            soup = BeautifulSoup(response.text, 'html.parser')
+            
+            # Remove script, style, and navigation noise if possible
+            for tag in soup(["script", "style", "svg", "path"]):
+                tag.decompose()
+            
+            # Try to find header and footer tags
+            header = soup.find('header')
+            footer = soup.find('footer')
+            
+            header_text = header.get_text(separator=' ').strip() if header else ""
+            footer_text = footer.get_text(separator=' ').strip() if footer else ""
+            
+            # Fallback to common class names if semantic tags are missing
+            if not header_text:
+                header_alt = soup.find(['div', 'nav'], class_=re.compile(r'header|top|nav', re.I))
+                if header_alt: header_text = header_alt.get_text(separator=' ').strip()
+                
+            if not footer_text:
+                footer_alt = soup.find('div', class_=re.compile(r'footer|bottom', re.I))
+                if footer_alt: footer_text = footer_alt.get_text(separator=' ').strip()
+
+            # Get general text for context
+            full_text = soup.get_text(separator=' ')
+            lines = [line.strip() for line in full_text.splitlines() if line.strip()]
+            main_text = ' '.join(lines)[:2000]
+            
+            # Format output for LLM to see clear sections
+            result = f"DOMAIN: {url}\n\n"
+            result += f"--- WEBSITE HEADER ---\n{header_text[:1000] if header_text else 'No clear header found.'}\n\n"
+            result += f"--- WEBSITE FOOTER ---\n{footer_text[:1000] if footer_text else 'No clear footer found.'}\n\n"
+            result += f"--- PAGE PREVIEW ---\n{main_text}"
+            
+            return result
+        except Exception as e:
+            return f"Crawl Error: {str(e)}"
 
 
 # Define a simpler output model for the Crew specifically
@@ -170,5 +218,157 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
     return Crew(
         agents=[researcher, analyst],
         tasks=[research_task, analysis_task],
+        process=Process.sequential
+    )
+
+def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason: str, website: str = None):
+    # Instantiate tools
+    search_tool = SearXNGSearchTool(brand_name_filter=brand_name)
+    crawl_tool = WebCrawlTool()
+    
+    # LLM Setup
+    llm = LLM(
+        model=Config.OLLAMA_MODEL,
+        base_url=f"{Config.OLLAMA_BASE_URL}/v1",
+        api_key="ollama",
+        temperature=Config.OLLAMA_TEMP,
+        max_tokens=Config.OLLAMA_MAX_TOKENS,
+        stop=["\n\n\n"]
+    )
+
+    researcher = Agent(
+        role='Business Intelligence Researcher',
+        goal=f'Find and verify the official website of {brand_name}.',
+        backstory="You are experts at identifying the ONE official website for a brand, avoiding social media pages or directories.",
+        tools=[search_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    contact_extractor = Agent(
+        role='Contact Information Specialist',
+        goal=f'Extract phone numbers and emails from the official website headers and footers of {brand_name}.',
+        backstory="You are a specialist in finding contact details. You focus specifically on the header and footer of websites, as that is where contact info usually lives.",
+        tools=[crawl_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    brand_strategist = Agent(
+        role='Brand Strategist',
+        goal=f'Understand {brand_name}\'s business model and craft a compelling reason to call them.',
+        backstory="You are a marketing expert. You analyze a company's website content to understand what they do, their target audience, and why they would benefit from outdoor advertising.",
+        tools=[crawl_tool],
+        llm=llm,
+        verbose=True,
+        max_iter=3
+    )
+
+    analyst = Agent(
+        role='Social Lead Validator',
+        goal=f'Determine if {brand_name} is a high-quality lead based on all research. Qualify and score lead.',
+        backstory="You synthesize all data. You look at the business relevance and the ease of contact to provide a final score.",
+        llm=llm, 
+        verbose=True,
+        max_iter=2
+    )
+
+    # Task 1: Find Official Website
+    research_task = Task(
+        description=f"""
+        1. Search for {brand_name} (UAE focus) using searxng_search.
+        2. Identify the ONE official website URL (e.g., brandname.com or linktr.ee/brand).
+        
+        Respond with valid JSON:
+        {{
+            "brand_name": "{brand_name}",
+            "official_website": "...", 
+            "industry_guess": "..."
+        }}
+        """,
+        expected_output="JSON with official website URL",
+        agent=researcher
+    )
+
+    # Task 2: Targeted Contact Extraction
+    contact_task = Task(
+        description=f"""
+        Review the official website found: {{research_task.output}}
+        
+        1. Use web_crawl on the official website.
+        2. Analyze the HEADER and FOOTER sections provided by the tool.
+        3. Extract any Phone Numbers and Emails. 
+        4. If the website is a Linktree, extract all listed links and contact options.
+        
+        Respond with valid JSON:
+        {{
+            "phone": "...", 
+            "email": "...",
+            "other_contacts": "..."
+        }}
+        """,
+        expected_output="JSON with extracted contact details",
+        agent=contact_extractor,
+        context=[research_task]
+    )
+
+    strategy_task = Task(
+        description=f"""
+        Review the website details for {brand_name}: {{contact_task.output}}
+        
+        1. Use web_crawl on the official website if needed to understand the business offerings.
+        2. Craft a ONE SENTENCE 'reason to call' that explains why we should reach out to them.
+        3. Identify their main industry.
+        
+        Respond with valid JSON:
+        {{
+            "ai_reason_to_call": "...",
+            "industry": "..."
+        }}
+        """,
+        expected_output="JSON with AI reason to call and industry",
+        agent=brand_strategist,
+        context=[research_task, contact_task]
+    )
+
+    # Task 3: Final Validation and Scoring
+    validation_task = Task(
+        description=f"""
+        Influencer '{influencer}' promoted '{brand_name}' for: '{post_reason}'.
+        Research: {{research_task.output}}
+        Contacts: {{contact_task.output}}
+        
+        Final Lead Qualification:
+        - confidence_score (0-100)
+        - contactibility_score (0-100): High if phone AND email found in website header/footer.
+        
+        Ensure the 'company' object is fully populated.
+        
+        Output JSON:
+        {{
+            "brand_name": "{brand_name}",
+            "confidence_score": ...,
+            "contactibility_score": ...,
+            "category_main_industry": "...",
+            "ai_reason_to_call": "...",
+            "notes": "Extracted contacts from website header/footer.",
+            "company": {{
+                "phone": "...",
+                "email": "...",
+                "website": "...",
+                "Other": "..."
+            }}
+        }}
+        """,
+        expected_output="Final Lead JSON",
+        agent=analyst,
+        context=[research_task, contact_task]
+    )
+
+    return Crew(
+        agents=[researcher, analyst],
+        tasks=[research_task, validation_task],
         process=Process.sequential
     )

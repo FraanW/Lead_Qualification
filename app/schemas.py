@@ -19,6 +19,7 @@ class LeadOutput(BaseModel):
     source: Literal["social", "news", "proximity"] = "news"
     category_main_industry: str = ""
     confidence_score: int = Field(default=0, ge=0, le=100)
+    contactibility_score: int = Field(default=0, ge=0, le=100)
     enrichment_status: Literal["enriched", "needs apollo"] = "needs apollo"
     company: CompanyDetails = Field(default_factory=CompanyDetails)
     decision_maker_1: DecisionMaker = Field(default_factory=DecisionMaker)

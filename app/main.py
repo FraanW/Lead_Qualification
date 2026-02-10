@@ -5,7 +5,7 @@ import io
 import os
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
-from .agents import get_lead_analysis_crew
+from .agents import get_lead_analysis_crew, get_social_lead_analysis_crew
 from .schemas import LeadOutput, CompanyDetails, DecisionMaker
 from .config import Config
 
@@ -175,6 +175,188 @@ async def process_excel_background(job_id: str, df: pd.DataFrame):
     
     jobs[job_id]["status"] = "completed"
     jobs[job_id]["output_file"] = output_filename
+
+async def process_social_row(row: dict, is_retry: bool = False) -> dict:
+    async with concurrency_limit:
+        try:
+            brand_name = row.get("Brand")
+            if not brand_name or str(brand_name).lower() in ["nan", "none", "", "null"]:
+                return None
+            
+            post_reason = row.get("Reason to call for OOH")
+            influencer = row.get("Influencer promoting")
+            website = row.get("Website")
+            email = row.get("Email")
+            
+            # Simple clean up
+            if str(website).lower() in ["none", "nan", ""]: website = None
+            if str(email).lower() in ["none", "nan", ""]: email = None
+            
+            print(f"--- Processing Social Lead{' (RETRY)' if is_retry else ''}: {brand_name} ---")
+            
+            # Kickoff the social crew
+            crew = get_social_lead_analysis_crew(brand_name, influencer, post_reason, website)
+            
+            try:
+                result = await asyncio.wait_for(
+                    asyncio.to_thread(crew.kickoff), 
+                    timeout=90 if is_retry else 60 
+                )
+            except asyncio.TimeoutError:
+                return {
+                    "data": LeadOutput(
+                        brand_name=brand_name,
+                        source="social",
+                        ai_reason_to_call="Timeout during research",
+                        notes="Processing exceeded time limit"
+                    ).model_dump(),
+                    "needs_retry": not is_retry and website is not None
+                }
+            
+            # Extract JSON
+            try:
+                import json
+                import re
+                raw_output = str(result.raw) if hasattr(result, 'raw') else str(result)
+                json_match = re.search(r'\{.*\}', raw_output, re.DOTALL)
+                
+                if json_match:
+                    data = json.loads(json_match.group(0))
+                    
+                    # Check if we should retry: score 0 and we have a website might mean search failed
+                    # Or if explicitly no data found
+                    should_retry = False
+                    if not is_retry and website and data.get("confidence_score", 0) == 0:
+                        should_retry = True
+                    
+                    # Map back to LeadOutput
+                    lead = LeadOutput(
+                        brand_name=brand_name,
+                        source="social",
+                        category_main_industry=data.get("category_main_industry", "Unknown"),
+                        confidence_score=data.get("confidence_score", 0),
+                        contactibility_score=data.get("contactibility_score", 0),
+                        enrichment_status="needs apollo",
+                        company=CompanyDetails(
+                            phone=data.get("company", {}).get("phone", ""),
+                            email=data.get("company", {}).get("email", email or ""),
+                            website=data.get("company", {}).get("website", website or ""),
+                            Other=data.get("company", {}).get("Other", "")
+                        ),
+                        ai_reason_to_call=data.get("ai_reason_to_call", ""),
+                        notes=data.get("notes", "")
+                    )
+                    return {"data": lead.model_dump(), "needs_retry": should_retry, "original_row": row}
+                else:
+                    raise ValueError("No JSON found")
+            except Exception as e:
+                print(f"Parsing error for {brand_name}: {e}")
+                return {
+                    "data": LeadOutput(
+                        brand_name=brand_name,
+                        source="social",
+                        ai_reason_to_call="AI output parsing failed",
+                        notes=f"Raw: {raw_output[:200]}"
+                    ).model_dump(),
+                    "needs_retry": not is_retry and website is not None,
+                    "original_row": row
+                }
+                
+        except Exception as e:
+            print(f"Error processing social row {brand_name}: {e}")
+            return {
+                "data": LeadOutput(
+                    brand_name=brand_name,
+                    source="social",
+                    notes=f"Error: {str(e)}"
+                ).model_dump(),
+                "needs_retry": False
+            }
+
+async def process_social_excel_background(job_id: str, df: pd.DataFrame):
+    jobs[job_id]["status"] = "running"
+    
+    # Remove empty rows
+    df = df.dropna(subset=["Brand"])
+    
+    # First Pass
+    tasks = []
+    for i, row in df.iterrows():
+        tasks.append(process_social_row(row.to_dict()))
+    
+    results = await asyncio.gather(*tasks)
+    
+    final_results = []
+    retry_tasks = []
+    
+    for res in results:
+        if res is None: continue
+        
+        if res.get("needs_retry"):
+            print(f"Queueing retry for: {res['data']['brand_name']}")
+            retry_tasks.append(process_social_row(res["original_row"], is_retry=True))
+        else:
+            final_results.append(res["data"])
+            
+    # Second Pass (Retry once)
+    if retry_tasks:
+        print(f"Starting retry pass for {len(retry_tasks)} leads...")
+        retry_results = await asyncio.gather(*retry_tasks)
+        for r in retry_results:
+            if r:
+                final_results.append(r["data"])
+    
+    # Flatten
+    flattened_rows = []
+    for r in final_results:
+        flat = {}
+        # Manually flatten
+        flat["brand_name"] = r.get("brand_name")
+        flat["source"] = r.get("source")
+        flat["category_main_industry"] = r.get("category_main_industry")
+        flat["confidence_score"] = r.get("confidence_score")
+        flat["contactibility_score"] = r.get("contactibility_score")
+        flat["enrichment_status"] = r.get("enrichment_status")
+        
+        company = r.get("company", {})
+        flat["company_phone"] = company.get("phone")
+        flat["company_email"] = company.get("email")
+        flat["company_website"] = company.get("website")
+        flat["company_other"] = company.get("Other")
+        
+        dm = r.get("decision_maker_1", {})
+        flat["dm_name"] = dm.get("name")
+        flat["dm_job_title"] = dm.get("job_title")
+        flat["dm_mobile"] = dm.get("mobile_number")
+        flat["dm_contact"] = dm.get("contact_number")
+        flat["dm_email"] = dm.get("work_email")
+        
+        flat["ai_reason_to_call"] = r.get("ai_reason_to_call")
+        flat["notes"] = r.get("notes")
+        
+        flattened_rows.append(flat)
+
+    output_filename = f"social_processed_{job_id}.csv"
+    pd.DataFrame(flattened_rows).to_csv(output_filename, index=False)
+    
+    jobs[job_id]["output_file"] = output_filename
+    jobs[job_id]["status"] = "completed"
+
+@app.post("/analyze-social-leads")
+async def analyze_social_leads(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
+    try:
+        contents = await file.read()
+        df = pd.read_excel(io.BytesIO(contents))
+        
+        job_id = str(uuid.uuid4())
+        jobs[job_id] = {"status": "queued"}
+        
+        background_tasks.add_task(process_social_excel_background, job_id, df)
+        
+        return {"job_id": job_id, "message": "Social media file uploaded. Processing started.", "rows": len(df)}
+        
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=str(e))
 
 @app.post("/analyze-leads")
 async def analyze_leads(background_tasks: BackgroundTasks, file: UploadFile = File(...)):
