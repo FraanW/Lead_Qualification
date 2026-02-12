@@ -255,13 +255,13 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         
         Respond with ONLY this format:
         {{
-            "industry": "...", 
-            "website_url": "...", 
+            "industry": "Industry Name", 
+            "website_url": "https://example.com", 
             "local_contact_snippet": "Summarize any +971 or UAE info found here",
-            "notes": "..."
+            "notes": "Any additional notes"
         }}
         
-        If no results: {{"industry": "Unknown", "website_url": null, "local_contact_snippet": "", "notes": "No data"}}
+        If no results: {{ "industry": "Unknown", "website_url": "", "local_contact_snippet": "", "notes": "No data" }}
         """,
         expected_output="JSON object with industry, website_url, local_contact_snippet, notes",
         agent=researcher
@@ -277,12 +277,12 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         3. CRITICAL: Prioritize UAE/GCC contact details (+971 numbers and UAE addresses). 
         4. If the researcher found a local snippet ({{research_task.output.local_contact_snippet}}), incorporate that info.
         
-        Respond with valid JSON:
+        Respond with valid JSON using actual data found (use empty string "" if not found):
         {{
-            "phone": "...", 
-            "email": "...",
-            "address": "...",
-            "other_contacts": "..."
+            "phone": "+971...", 
+            "email": "example@domain.com",
+            "address": "Full Address",
+            "other_contacts": "Instagram, etc"
         }}
         
         If no website or crawl fails, use the info from the researcher snippet if available.
@@ -313,17 +313,17 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.
         
-        Output format:
+        Output format (use empty strings "" if data is missing, DO NOT use "..."):
         {{
             "confidence_score": 80,
-            "reason_to_call": "...",
-            "category_main_industry": "...",
-            "notes": "...",
+            "reason_to_call": "Reason string",
+            "category_main_industry": "Industry string",
+            "notes": "Notes string",
             "company": {{
-                "phone": "...",
-                "email": "...",
-                "website": "...",
-                "Other": "..."
+                "phone": "+971...",
+                "email": "email@example.com",
+                "website": "https://...",
+                "Other": ""
             }}
         }}
         """,
@@ -422,14 +422,14 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
         
         1. Use web_crawl on the official website.
         2. CRITICAL: Prioritize UAE/GCC contact details (+971 numbers and UAE addresses). 
-        3. If the researcher found a local snippet ({{research_task.output.local_contact_snippet}}), incorporate that info.
+        3. If the researcher found a local snippet in the research, incorporate that info.
         
-        Respond with valid JSON:
+        Respond with valid JSON (use "" for missing fields):
         {{
-            "phone": "...", 
-            "email": "...",
-            "address": "...",
-            "other_contacts": "..."
+            "phone": "+971...", 
+            "email": "name@domain.com",
+            "address": "Full Address",
+            "other_contacts": ""
         }}
         """,
         expected_output="JSON with extracted contact details (UAE prioritized)",
@@ -449,8 +449,8 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
         
         Respond with valid JSON:
         {{
-            "ai_reason_to_call": "...",
-            "industry": "..."
+            "ai_reason_to_call": "Reason string",
+            "industry": "Industry string"
         }}
         """,
         expected_output="JSON with AI reason to call and industry",
@@ -482,19 +482,19 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.
         
-        Output JSON:
+        Output JSON (use empty strings "" if data is missing, DO NOT use "..."):
         {{
             "brand_name": "{brand_name}",
             "confidence_score": 85,
-            "contactibility_score": ...,
+            "contactibility_score": 0,
             "category_main_industry": "{{strategy_task.output.industry}}",
             "ai_reason_to_call": "{{strategy_task.output.ai_reason_to_call}}",
             "notes": "Extracted contacts from website content.",
             "company": {{
-                "phone": "...",
-                "email": "...",
-                "website": "...",
-                "Other": "..."
+                "phone": "+971...",
+                "email": "contact@domain.com",
+                "website": "https://...",
+                "Other": ""
             }}
         }}
         """,
@@ -598,14 +598,14 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
         
         1. Use web_crawl on the official website.
         2. CRITICAL: Prioritize UAE/GCC contact details (+971 numbers and UAE addresses). 
-        3. If the researcher found a local snippet ({{research_task.output.local_contact_snippet}}), incorporate that info.
+        3. If the researcher found a local snippet in the research, incorporate that info.
         
-        Respond with valid JSON:
+        Respond with valid JSON (use "" for missing fields):
         {{
-            "phone": "...", 
-            "email": "...",
-            "address": "...",
-            "other_contacts": "..."
+            "phone": "+971...", 
+            "email": "name@domain.com",
+            "address": "Full Address",
+            "other_contacts": ""
         }}
         """,
         expected_output="JSON with extracted contact details (UAE prioritized)",
@@ -625,8 +625,8 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
         
         Respond with valid JSON:
         {{
-            "ai_reason_to_call": "...",
-            "industry": "..."
+            "ai_reason_to_call": "Reason string",
+            "industry": "Industry string"
         }}
         """,
         expected_output="JSON with AI reason to call and industry",
@@ -657,19 +657,19 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.
         
-        Output JSON:
+        Output JSON (use empty strings "" if data is missing, DO NOT use "..."):
         {{
             "brand_name": "{brand_name}",
             "confidence_score": 75,
-            "contactibility_score": ...,
+            "contactibility_score": 0,
             "category_main_industry": "{{strategy_task.output.industry}}",
             "ai_reason_to_call": "{{strategy_task.output.ai_reason_to_call}}",
             "notes": "Extracted contacts. .ae fallback used if applicable.",
             "company": {{
-                "phone": "...",
-                "email": "...",
-                "website": "...",
-                "Other": "..."
+                "phone": "+971...",
+                "email": "name@domain.com",
+                "website": "https://...",
+                "Other": ""
             }}
         }}
         """,

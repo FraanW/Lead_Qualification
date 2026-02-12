@@ -323,28 +323,52 @@ async def process_social_row(row: dict, is_retry: bool = False) -> dict:
                 if json_match:
                     data = json.loads(json_match.group(0))
                     
-                    # Check if we should retry: score 0 and we have a website might mean search failed
-                    # Or if explicitly no data found
+                    # Clean up "..." artifacts if present
+                    def clean(val):
+                        return "" if val == "..." or val == "Not Found" else val
+
+                    c_phone = clean(data.get("company", {}).get("phone", ""))
+                    c_email = clean(data.get("company", {}).get("email", email or ""))
+                    c_website = clean(data.get("company", {}).get("website", website or ""))
+                    c_other = clean(data.get("company", {}).get("Other", ""))
+                    
+                    # Calculate contactability score
+                    has_website = bool(c_website)
+                    has_email = bool(c_email)
+                    has_phone = bool(c_phone)
+                    
+                    available_count = sum([has_website, has_email, has_phone])
+                    
+                    if available_count == 3:
+                        contactibility_score = 100
+                    elif available_count == 2:
+                        contactibility_score = 60
+                    elif available_count == 1:
+                        contactibility_score = 30
+                    else:
+                        contactibility_score = 0
+
+                    # Check retry condition (score 0 means likely failed research)
                     should_retry = False
-                    if not is_retry and website and data.get("confidence_score", 0) == 0:
+                    if not is_retry and website and contactibility_score == 0:
                         should_retry = True
                     
                     # Map back to LeadOutput
                     lead = LeadOutput(
                         brand_name=brand_name,
                         source="social",
-                        category_main_industry=data.get("category_main_industry", "Unknown"),
+                        category_main_industry=clean(data.get("category_main_industry", "Unknown")),
                         confidence_score=data.get("confidence_score", 0),
-                        contactibility_score=data.get("contactibility_score", 0),
+                        contactibility_score=contactibility_score,
                         enrichment_status="needs apollo",
                         company=CompanyDetails(
-                            phone=data.get("company", {}).get("phone", ""),
-                            email=data.get("company", {}).get("email", email or ""),
-                            website=data.get("company", {}).get("website", website or ""),
-                            Other=data.get("company", {}).get("Other", "")
+                            phone=c_phone,
+                            email=c_email,
+                            website=c_website,
+                            Other=c_other
                         ),
-                        ai_reason_to_call=data.get("ai_reason_to_call", ""),
-                        notes=data.get("notes", "")
+                        ai_reason_to_call=clean(data.get("ai_reason_to_call", "")),
+                        notes=clean(data.get("notes", ""))
                     )
                     return {"data": lead.model_dump(), "needs_retry": should_retry, "original_row": row}
                 else:
@@ -439,12 +463,16 @@ async def process_business_row(row: dict) -> dict:
                 if json_match:
                     data = json.loads(json_match.group(0))
                     
+                    # Clean up "..." artifacts
+                    def clean(val):
+                        return "" if val == "..." or val == "Not Found" else val
+
                     # Extract fetched contact info
                     company_data = data.get("company", {})
-                    fetched_phone = company_data.get("phone", "")
-                    fetched_email = company_data.get("email", "")
-                    fetched_website = company_data.get("website", "") or data.get("official_website", "") or website or ""
-                    fetched_other = company_data.get("Other", "")
+                    fetched_phone = clean(company_data.get("phone", ""))
+                    fetched_email = clean(company_data.get("email", ""))
+                    fetched_website = clean(company_data.get("website", "") or data.get("official_website", "") or website or "")
+                    fetched_other = clean(company_data.get("Other", ""))
                     
                     # Contact validation and penalty logic
                     penalty = 0
