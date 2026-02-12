@@ -54,40 +54,38 @@ class SearXNGSearchTool(BaseTool):
                 return "No results found for this business."
 
             # Extract potential official website from results
-            potential_sites = []
+            scored_sites = []
+            brand_words = [w for w in brand_kw_normalized.split() if len(w) > 2] # focus on significant words
+            if not brand_words and brand_kw_normalized:
+                brand_words = [brand_kw_normalized]
+
             for res in raw_results[:15]:  # Check top 15 for official site
                 url = res.get('url', '').lower()
-                url_normalized = ''.join(c for c in url if c.isalnum())
+                domain = url.split('//')[-1].split('/')[0]
                 
-                # Look for official domains (not social media, not job boards, not news sites)
-                # Stricter check: brand name should be a distinct part of the URL
-                is_match = False
-                if brand_kw and (brand_kw in url or brand_kw_normalized in url_normalized):
-                    # Avoid matching generic sub-words (e.g., 'max' matching 'maxfashion' if brand is 'max&co')
-                    # If brand has symbols like '&', be more strict
-                    if '&' in self.brand_name_filter or '.' in self.brand_name_filter:
-                         if brand_kw in url or brand_kw_normalized in url_normalized:
-                             is_match = True
-                    else:
-                        is_match = True
-
-                if is_match and not any(
-                    excluded in url for excluded in ['linkedin', 'facebook', 'instagram', 'twitter', 'indeed', 'glassdoor', 'wikipedia', 'youtube', 'vinted', 'depop', 'ebay', 'amazon', 'pinterest']
-                ):
-                    potential_sites.append(res.get('url'))
+                if not any(excluded in url for excluded in ['linkedin', 'facebook', 'instagram', 'twitter', 'indeed', 'glassdoor', 'wikipedia', 'youtube', 'vinted', 'depop', 'ebay', 'amazon', 'pinterest']):
+                    score = 0
+                    # Exact brand in domain (high score)
+                    if brand_kw_normalized and brand_kw_normalized in domain.replace('.', ''):
+                        score += 50
+                    # Words match in domain (significant boost)
+                    for word in brand_words:
+                        if word in domain:
+                            score += 20
+                    # UAE focus
+                    if '.ae' in domain or '/uae' in url or 'dubai' in url:
+                        score += 30
+                    # Shorter URLs preferred for official sites (penalty for deep links)
+                    score -= (len(url.split('/')) - 3) * 5
+                    
+                    if score > 0:
+                        scored_sites.append((score, res.get('url')))
             
-            # Prioritize UAE-specific domains/paths
+            # Pick the highest scored site
             official_website = None
-            if potential_sites:
-                # 1st priority: .ae domains or /uae/ /en-ae/ paths
-                for site in potential_sites:
-                    site_lower = site.lower()
-                    if '.ae' in site_lower or '/uae' in site_lower or '/en-ae' in site_lower or 'dubai' in site_lower:
-                        official_website = site
-                        break
-                # 2nd priority: the very first valid match (likely the .com)
-                if not official_website:
-                    official_website = potential_sites[0]
+            if scored_sites:
+                scored_sites.sort(key=lambda x: x[0], reverse=True)
+                official_website = scored_sites[0][1]
             
             formatted = []
             if official_website:
@@ -299,7 +297,7 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         
         Final Qualification:
         1. Brand Verification: If the website_url does not match '{brand_name}', set confidence_score to 0.
-        2. Penalize Govt/Public Entities: If the entity is a Government Authority, Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
+        2. Penalize Govt/Public/Authority Entities: If the entity is a Government Authority (e.g., RTA, DEWA), Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
         3. Prioritize UAE Presence: If both a global and a UAE contact (+971) were found, you MUST use the UAE one.
         4. Ensure the 'company' object uses the best UAE-specific contact info.
         5. Address formatting: Only prefix address in 'notes' if it exists.
@@ -308,7 +306,7 @@ def get_lead_analysis_crew(brand_name: str, context: str, website: str = None):
         - Commercial Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
         - Commercial Fashion/Consumer brands: 60-80
         - B2B Manufacturing/Packaging: 20-40 (low fit)
-        - Govt Authorities/Public Spaces: 0-10 (PENALIZED)
+        - Govt/State/Authorities (e.g. RTA)/Public Spaces: 0-10 (PENALIZED)
         - Unknown/No data/Brand Mismatch: 0
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.
@@ -385,10 +383,10 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
 
     analyst = Agent(
         role='Social Lead Validator',
-        goal=f'Determine if {brand_name} is a high-quality lead based on all research. Qualify and score lead.',
+        goal=f'Determine if {brand_name} is a high-quality lead. Qualify and score lead.',
         backstory="""You synthesize all data. You analyze companies objectively. 
-        CRITICAL: Non-commercial entities like Government Authorities, Ministries, Customs, Police, and Public Spaces (malls, parks, beaches) are NOT target leads for standard private advertising. 
-        You MUST penalize them with a confidence_score of 0-10.""",
+        CRITICAL: Non-commercial entities like Government Authorities (e.g., RTA, DEWA, Municipality), State-owned non-commercial entities, Ministries, Customs, Police, and Public Spaces (malls, parks, beaches) are NOT target leads for standard private advertising. 
+        You MUST penalize them with a confidence_score of 0-10. These are public services, not commercial products/services suitable for OOH billboards.""",
         llm=llm, 
         verbose=True,
         max_iter=2
@@ -466,9 +464,9 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
         Contacts: {{contact_task.output}}
         Strategy: {{strategy_task.output}}
         
-        Final Lead Qualification:
+        Final Qualification:
         1. Brand Verification: If the official_website does not match '{brand_name}', set confidence_score to 0.
-        2. Penalize Govt/Public Entities: If the entity is a Government Authority, Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
+        2. Penalize Govt/Public/Authority Entities: If the entity is a Government Authority (e.g., RTA, DEWA), Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
         3. Prioritize UAE Presence: If both a global and a UAE contact (+971) were found, you MUST use the UAE one.
         4. Ensure the 'company' object uses the best UAE-specific contact info.
         5. Address formatting: Only prefix address in 'notes' if it exists.
@@ -477,7 +475,7 @@ def get_social_lead_analysis_crew(brand_name: str, influencer: str, post_reason:
         - Commercial Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
         - Commercial Fashion/Consumer brands: 60-80
         - B2B Manufacturing/Packaging: 20-40 (low fit)
-        - Govt Authorities/Public Spaces: 0-10 (PENALIZED)
+        - Govt/State Authorities (e.g. RTA)/Public Spaces: 0-10 (PENALIZED)
         - Unknown/No data/Brand Mismatch: 0
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.
@@ -561,10 +559,9 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
     analyst = Agent(
         role='Business Lead Validator',
         goal=f'Determine if {brand_name} is a high-quality lead. Qualify and score lead.',
-        backstory=f"You synthesize all data. You filter out public spaces and malls. "
-                  f"CRITICAL: If {brand_name} is identified as a public mall (e.g., Deira City Centre, Dubai Mall), "
-                  f"or a public space (e.g., Waterfront Beach, Corniche, Parks, Markets), you MUST score confidence_score as 0-10 "
-                  f"and set notes to 'Public space/Mall - not suitable for outreach.'",
+        backstory="""You synthesize all data. You analyze companies objectively. 
+        CRITICAL: Non-commercial entities like Government Authorities (e.g., RTA, DEWA, Municipality), State-owned non-commercial entities, Ministries, Customs, Police, and Public Spaces (malls, parks, beaches) are NOT target leads for standard private advertising. 
+        You MUST penalize them with a confidence_score of 0-10. These are public services, not commercial products/services suitable for OOH billboards.""",
         llm=llm, 
         verbose=True,
         max_iter=2
@@ -641,9 +638,9 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
         Contacts: {{contact_task.output}}
         Strategy: {{strategy_task.output}}
         
-        Final Lead Qualification:
+        Final Qualification:
         1. Brand Verification: If the official_website does not match '{brand_name}', set confidence_score to 0.
-        2. Penalize Govt/Public Entities: If the entity is a Government Authority, Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
+        2. Penalize Govt/Public/Authority Entities: If the entity is a Government Authority (e.g., RTA, DEWA), Ministry, Customs, Police, or a Public Space (Mall/Beach/Park), you MUST use a confidence_score between 0 and 10.
         3. Prioritize UAE Presence: If both a global and a UAE contact (+971) were found, you MUST use the UAE one.
         4. Ensure the 'company' object uses the best UAE-specific contact info.
         5. Address formatting: Only prefix address in 'notes' if it exists.
@@ -652,7 +649,7 @@ def get_business_lead_analysis_crew(brand_name: str, website: str = None):
         - Commercial Retail/Auto/Healthcare/RealEstate: 70-90 (high billboard fit)
         - Commercial Fashion/Consumer brands: 60-80
         - B2B Manufacturing/Packaging: 20-40 (low fit)
-        - Govt Authorities/Public Spaces: 0-10 (PENALIZED)
+        - Govt/State Authorities (e.g. RTA)/Public Spaces: 0-10 (PENALIZED)
         - Unknown/No data/Brand Mismatch: 0
         
         CRITICAL: confidence_score MUST be an INTEGER between 0 and 100.

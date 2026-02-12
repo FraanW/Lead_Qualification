@@ -17,6 +17,14 @@ jobs = {}
 # Semaphore to control concurrency
 concurrency_limit = asyncio.Semaphore(Config.MAX_CONCURRENT_CREWS)
 
+def clean_excel_value(val):
+    if val is None:
+        return ""
+    s = str(val).strip()
+    if s.startswith(('=', '@', '+', '-')) and len(s) > 0:
+        return f"'{s}"  # Use single quote to force text in Excel/CSV
+    return s
+
 async def process_row(row: dict) -> dict:
     async with concurrency_limit:
         try:
@@ -221,8 +229,9 @@ async def process_excel_background(job_id: str, df: pd.DataFrame):
     jobs[job_id]["status"] = "running"
     results = []
     
-    # Remove empty rows before processing
+    # Remove empty rows and deduplicate before processing
     df = df.dropna(subset=["Business Name"])
+    df = df.drop_duplicates(subset=["Business Name"], keep='first')
     
     # Create tasks
     tasks = []
@@ -244,28 +253,28 @@ async def process_excel_background(job_id: str, df: pd.DataFrame):
     for r in processed_rows:
         flat = {}
         # Manually flatten in the exact order as social leads
-        flat["brand_name"] = r.get("brand_name")
-        flat["source"] = r.get("source")
-        flat["category_main_industry"] = r.get("category_main_industry")
+        flat["brand_name"] = clean_excel_value(r.get("brand_name"))
+        flat["source"] = clean_excel_value(r.get("source"))
+        flat["category_main_industry"] = clean_excel_value(r.get("category_main_industry"))
         flat["confidence_score"] = r.get("confidence_score")
         flat["contactibility_score"] = r.get("contactibility_score")
-        flat["enrichment_status"] = r.get("enrichment_status")
+        flat["enrichment_status"] = clean_excel_value(r.get("enrichment_status"))
         
         company = r.get("company", {})
-        flat["company_phone"] = company.get("phone")
-        flat["company_email"] = company.get("email")
-        flat["company_website"] = company.get("website")
-        flat["company_other"] = company.get("Other")
+        flat["company_phone"] = clean_excel_value(company.get("phone"))
+        flat["company_email"] = clean_excel_value(company.get("email"))
+        flat["company_website"] = clean_excel_value(company.get("website"))
+        flat["company_other"] = clean_excel_value(company.get("Other"))
         
         dm = r.get("decision_maker_1", {})
-        flat["dm_name"] = dm.get("name")
-        flat["dm_job_title"] = dm.get("job_title")
-        flat["dm_mobile"] = dm.get("mobile_number")
-        flat["dm_contact"] = dm.get("contact_number")
-        flat["dm_email"] = dm.get("work_email")
+        flat["dm_name"] = clean_excel_value(dm.get("name"))
+        flat["dm_job_title"] = clean_excel_value(dm.get("job_title"))
+        flat["dm_mobile"] = clean_excel_value(dm.get("mobile_number"))
+        flat["dm_contact"] = clean_excel_value(dm.get("contact_number"))
+        flat["dm_email"] = clean_excel_value(dm.get("work_email"))
         
-        flat["ai_reason_to_call"] = r.get("ai_reason_to_call")
-        flat["notes"] = r.get("notes")
+        flat["ai_reason_to_call"] = clean_excel_value(r.get("ai_reason_to_call"))
+        flat["notes"] = clean_excel_value(r.get("notes"))
         
         flattened_rows.append(flat)
 
@@ -568,8 +577,9 @@ async def process_business_row(row: dict) -> dict:
 async def process_social_excel_background(job_id: str, df: pd.DataFrame):
     jobs[job_id]["status"] = "running"
     
-    # Remove empty rows
+    # Remove empty rows and deduplicate
     df = df.dropna(subset=["Brand"])
+    df = df.drop_duplicates(subset=["Brand"], keep='first')
     
     # First Pass
     tasks = []
@@ -602,29 +612,29 @@ async def process_social_excel_background(job_id: str, df: pd.DataFrame):
     flattened_rows = []
     for r in final_results:
         flat = {}
-        # Manually flatten
-        flat["brand_name"] = r.get("brand_name")
-        flat["source"] = r.get("source")
-        flat["category_main_industry"] = r.get("category_main_industry")
+        # Manually flatten with Excel cleaning
+        flat["brand_name"] = clean_excel_value(r.get("brand_name"))
+        flat["source"] = clean_excel_value(r.get("source"))
+        flat["category_main_industry"] = clean_excel_value(r.get("category_main_industry"))
         flat["confidence_score"] = r.get("confidence_score")
         flat["contactibility_score"] = r.get("contactibility_score")
-        flat["enrichment_status"] = r.get("enrichment_status")
+        flat["enrichment_status"] = clean_excel_value(r.get("enrichment_status"))
         
         company = r.get("company", {})
-        flat["company_phone"] = company.get("phone")
-        flat["company_email"] = company.get("email")
-        flat["company_website"] = company.get("website")
-        flat["company_other"] = company.get("Other")
+        flat["company_phone"] = clean_excel_value(company.get("phone"))
+        flat["company_email"] = clean_excel_value(company.get("email"))
+        flat["company_website"] = clean_excel_value(company.get("website"))
+        flat["company_other"] = clean_excel_value(company.get("Other"))
         
         dm = r.get("decision_maker_1", {})
-        flat["dm_name"] = dm.get("name")
-        flat["dm_job_title"] = dm.get("job_title")
-        flat["dm_mobile"] = dm.get("mobile_number")
-        flat["dm_contact"] = dm.get("contact_number")
-        flat["dm_email"] = dm.get("work_email")
+        flat["dm_name"] = clean_excel_value(dm.get("name"))
+        flat["dm_job_title"] = clean_excel_value(dm.get("job_title"))
+        flat["dm_mobile"] = clean_excel_value(dm.get("mobile_number"))
+        flat["dm_contact"] = clean_excel_value(dm.get("contact_number"))
+        flat["dm_email"] = clean_excel_value(dm.get("work_email"))
         
-        flat["ai_reason_to_call"] = r.get("ai_reason_to_call")
-        flat["notes"] = r.get("notes")
+        flat["ai_reason_to_call"] = clean_excel_value(r.get("ai_reason_to_call"))
+        flat["notes"] = clean_excel_value(r.get("notes"))
         
         flattened_rows.append(flat)
 
@@ -653,8 +663,9 @@ async def process_business_excel_background(job_id: str, df: pd.DataFrame):
     """Background task to process business leads with contact validation"""
     jobs[job_id]["status"] = "running"
     
-    # Remove empty rows
+    # Remove empty rows and deduplicate
     df = df.dropna(subset=["Brand"])
+    df = df.drop_duplicates(subset=["Brand"], keep='first')
     
     # Process all rows
     tasks = [process_business_row(row) for _, row in df.iterrows()]
@@ -667,23 +678,23 @@ async def process_business_excel_background(job_id: str, df: pd.DataFrame):
     flattened_rows = []
     for lead_data in results:
         flat = {
-            "brand_name": lead_data.get("brand_name", ""),
-            "source": lead_data.get("source", "business"),
-            "category_main_industry": lead_data.get("category_main_industry", ""),
+            "brand_name": clean_excel_value(lead_data.get("brand_name", "")),
+            "source": clean_excel_value(lead_data.get("source", "business")),
+            "category_main_industry": clean_excel_value(lead_data.get("category_main_industry", "")),
             "confidence_score": lead_data.get("confidence_score", 0),
             "contactibility_score": lead_data.get("contactibility_score", 0),
-            "enrichment_status": lead_data.get("enrichment_status", "needs apollo"),
-            "company_phone": lead_data.get("company", {}).get("phone", ""),
-            "company_email": lead_data.get("company", {}).get("email", ""),
-            "company_website": lead_data.get("company", {}).get("website", ""),
-            "company_other": lead_data.get("company", {}).get("Other", ""),
-            "dm_name": lead_data.get("decision_maker_1", {}).get("name", ""),
-            "dm_job_title": lead_data.get("decision_maker_1", {}).get("job_title", ""),
-            "dm_mobile": lead_data.get("decision_maker_1", {}).get("mobile_number", ""),
-            "dm_contact": lead_data.get("decision_maker_1", {}).get("contact_number", ""),
-            "dm_email": lead_data.get("decision_maker_1", {}).get("work_email", ""),
-            "ai_reason_to_call": lead_data.get("ai_reason_to_call", ""),
-            "notes": lead_data.get("notes", "")
+            "enrichment_status": clean_excel_value(lead_data.get("enrichment_status", "needs apollo")),
+            "company_phone": clean_excel_value(lead_data.get("company", {}).get("phone", "")),
+            "company_email": clean_excel_value(lead_data.get("company", {}).get("email", "")),
+            "company_website": clean_excel_value(lead_data.get("company", {}).get("website", "")),
+            "company_other": clean_excel_value(lead_data.get("company", {}).get("Other", "")),
+            "dm_name": clean_excel_value(lead_data.get("decision_maker_1", {}).get("name", "")),
+            "dm_job_title": clean_excel_value(lead_data.get("decision_maker_1", {}).get("job_title", "")),
+            "dm_mobile": clean_excel_value(lead_data.get("decision_maker_1", {}).get("mobile_number", "")),
+            "dm_contact": clean_excel_value(lead_data.get("decision_maker_1", {}).get("contact_number", "")),
+            "dm_email": clean_excel_value(lead_data.get("decision_maker_1", {}).get("work_email", "")),
+            "ai_reason_to_call": clean_excel_value(lead_data.get("ai_reason_to_call", "")),
+            "notes": clean_excel_value(lead_data.get("notes", ""))
         }
         flattened_rows.append(flat)
 
