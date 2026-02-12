@@ -50,7 +50,7 @@ async def process_row(row: dict) -> dict:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(crew.kickoff), 
-                    timeout=90  # 90s max per lead (3 tasks: research + contact + analysis)
+                    timeout=150  # Increased for deeper research
                 )
             except asyncio.TimeoutError:
                 # Calculate contactability: 30 if website available, 0 otherwise
@@ -300,7 +300,7 @@ async def process_social_row(row: dict, is_retry: bool = False) -> dict:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(crew.kickoff), 
-                    timeout=90 if is_retry else 60 
+                    timeout=150 if is_retry else 120 
                 )
             except asyncio.TimeoutError:
                 return {
@@ -417,7 +417,7 @@ async def process_business_row(row: dict) -> dict:
             try:
                 result = await asyncio.wait_for(
                     asyncio.to_thread(crew.kickoff), 
-                    timeout=90
+                    timeout=150
                 )
             except asyncio.TimeoutError:
                 contactibility = 30 if website else 0
